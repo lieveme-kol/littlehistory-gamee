@@ -1,0 +1,102 @@
+name: Build and publish Godot Web game (changed scripts)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "littlehistory-updated.zip"
+      - "littlehistory-changed-scripts.zip"
+      - ".github/workflows/build-web.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  export-web:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Godot 4.7.2 and Web export templates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          GODOT_VERSION="4.7.2"
+          mkdir -p "$RUNNER_TEMP/godot" "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          cd "$RUNNER_TEMP/godot"
+
+          curl -L --fail --retry 3 \
+            -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q godot.zip
+          GODOT_BIN="$(find . -maxdepth 2 -type f -name 'Godot_v*linux.x86_64' | head -n 1)"
+          test -n "$GODOT_BIN"
+          chmod +x "$GODOT_BIN"
+          echo "GODOT_BIN=$RUNNER_TEMP/godot/$GODOT_BIN" >> "$GITHUB_ENV"
+
+          curl -L --fail --retry 3 \
+            -o templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          mkdir templates
+          unzip -q templates.tpz -d templates
+          cp -a templates/templates/. "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
+
+      - name: Assemble full project and apply changed scripts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -s littlehistory-updated.zip
+          test -s littlehistory-changed-scripts.zip
+
+          mkdir -p source/base source/patch
+          unzip -q littlehistory-updated.zip -d source/base
+          unzip -q littlehistory-changed-scripts.zip -d source/patch
+
+          PROJECT_DIR="source/base/littlehistory"
+          test -f "$PROJECT_DIR/project.godot"
+
+          for script in game.gd title_screen.gd lh_hero.gd lh_item.gd lh_gizmo.gd; do
+            test -s "source/patch/$script"
+            install -D "source/patch/$script" "$PROJECT_DIR/scripts/$script"
+          done
+
+          mkdir -p "$PROJECT_DIR/dist"
+          echo "Applied changed scripts:"
+          ls -l "$PROJECT_DIR/scripts/"{game.gd,title_screen.gd,lh_hero.gd,lh_item.gd,lh_gizmo.gd}
+
+      - name: Import project resources
+        shell: bash
+        run: |
+          "$GODOT_BIN" --headless --editor --path source/base/littlehistory --quit
+
+      - name: Export Web build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          "$GODOT_BIN" --headless --path source/base/littlehistory \
+            --export-release "Web" dist/index.html
+          test -s source/base/littlehistory/dist/index.html
+          find source/base/littlehistory/dist -maxdepth 1 -type f -printf '%f %s bytes\n'
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: source/base/littlehistory/dist/
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    needs: export-web
+    steps:
+      - name: Publish website
+        id: deployment
+        uses: actions/deploy-pages@v4
